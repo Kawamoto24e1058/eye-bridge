@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Eye Tracker</title>
+    <!-- Socket.IO Client from CDN -->
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+
+    <!-- MediaPipe Libraries from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: sans-serif;
+            background: #222;
+            color: #fff;
+            text-align: center;
+        }
+
+        video {
+            transform: scaleX(-1);
+            width: 640px;
+            height: 480px;
+            border: 2px solid #555;
+        }
+
+        #status {
+            font-size: 24px;
+            margin: 10px;
+            color: #ff0;
+        }
+
+        #error-msg {
+            color: #f55;
+            background: #400;
+            padding: 10px;
+            margin: 10px;
+            display: none;
+            border-radius: 5px;
+        }
+
+        .data-display {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            font-size: 18px;
+            margin-bottom: 10px;
+        }
+
+        .data-box {
+            background: #333;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #555;
+            min-width: 150px;
+        }
+
+        .highlight {
+            color: #ff0;
+            font-weight: bold;
+            border: 1px solid #ff0;
+        }
+
+        .control-panel {
+            margin: 20px;
+            padding: 10px;
+            background: #333;
+            border-radius: 8px;
+            display: inline-block;
+        }
+
+        input[type=range] {
+            width: 300px;
+        }
+
+        .debug-values {
+            font-family: monospace;
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 5px;
+        }
+
+        .info-text {
+            font-size: 12px;
+            color: #bbb;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Eye Controller (v5.1 - Zero Latency)</h1>
+
+    <div id="error-msg"></div>
+    <div id="status">Initializing...</div>
+
+    <div class="control-panel">
+        <label for="winkThreshold">Wink Sensitivity (Threshold): <span id="threshVal">0.25</span></label><br>
+        <input type="range" id="winkThreshold" min="0.05" max="0.40" step="0.01" value="0.25"
+            oninput="updateThreshold(this.value)">
+        <div class="info-text">Adjust until Open > Threshold > Closed.<br>Blinks (both closed) are IGNORED.</div>
+    </div>
+
+    <div class="data-display">
+        <div class="data-box">
+            <div id="gazeVal">Gaze X: 0.00</div>
+        </div>
+        <div class="data-box">
+            <div id="winkLeft">Left Wink: NO</div>
+            <div class="debug-values" id="debugLeft">Open: 0.00</div>
+        </div>
+        <div class="data-box">
+            <div id="winkRight">Right Wink: NO</div>
+            <div class="debug-values" id="debugRight">Open: 0.00</div>
+        </div>
+    </div>
+
+    <div style="position: relative; display: inline-block;">
+        <video id="input_video"></video>
+    </div>
+
+    <div style="margin-top: 10px;">
+        <button onclick="retryCamera()">Retry Camera</button>
+    </div>
+
+    <script>
+        console.log("v5.1 Zero Latency Loaded");
+
+        const videoElement = document.getElementById('input_video');
+        const statusElement = document.getElementById('status');
+        const errorMsgElement = document.getElementById('error-msg');
+
+        let socket;
+        let faceMesh;
+        let camera;
+
+        // Configuration
+        let WINK_THRESHOLD = 0.25; // Default from slider
+        const SERVER_URL = 'http://localhost:3000';
+
+        function updateThreshold(val) {
+            WINK_THRESHOLD = parseFloat(val);
+            document.getElementById('threshVal').innerText = WINK_THRESHOLD.toFixed(2);
+        }
+
+        function showError(msg) {
+            errorMsgElement.style.display = 'block';
+            errorMsgElement.innerText = "Error: " + msg;
+            statusElement.innerText = "Failed";
+            statusElement.style.color = "red";
+            console.error(msg);
+        }
+
+        function initSocket() {
+            try {
+                socket = io(SERVER_URL);
+                socket.on('connect', () => {
+                    console.log("Connected to server via Socket.IO");
+                    statusElement.innerText = "Server Connected. Starting Camera...";
+                });
+                socket.on('connect_error', (err) => {
+                    showError("Socket Connection Failed. Is 'node server.js' running? " + err.message);
+                });
+            } catch (e) {
+                showError("Socket.IO Init Failed: " + e.message);
+            }
+        }
+
+        function onResults(results) {
+            if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+                statusElement.innerText = "No Face Detected";
+                statusElement.style.color = "orange";
+                return;
+            }
+
+            statusElement.innerText = "Tracking Active (Zero Latency)";
+            statusElement.style.color = "#0f0";
+            errorMsgElement.style.display = 'none';
+
+            const landmarks = results.multiFaceLandmarks[0];
+
+            // --- 1. Gaze Calculation ---
+            const leftEyeInner = landmarks[362];
+            const leftEyeOuter = landmarks[263];
+            const leftIris = landmarks[473];
+
+            const eyeWidth = leftEyeOuter.x - leftEyeInner.x;
+            const irisRelX = leftIris.x - leftEyeInner.x;
+            let ratio = irisRelX / eyeWidth;
+
+            let gazeX = (ratio - 0.5) * 6.0;
+            gazeX = Math.max(-1.5, Math.min(1.5, -gazeX));
+
+            // --- 2. Wink Detection (Zero Latency) ---
+            const leftH = Math.abs(landmarks[386].y - landmarks[374].y);
+            const leftW = Math.abs(landmarks[263].x - landmarks[362].x);
+            const leftOpenness = leftH / leftW;
+
+            const rightH = Math.abs(landmarks[159].y - landmarks[145].y);
+            const rightW = Math.abs(landmarks[133].x - landmarks[33].x);
+            const rightOpenness = rightH / rightW;
+
+            // Direct Threshold Comparison
+            const rawLeftClosed = leftOpenness < WINK_THRESHOLD;
+            const rawRightClosed = rightOpenness < WINK_THRESHOLD;
+
+            // Simple Exclusivity: 
+            // If Both Closed -> Blink -> Report NOTHING (False, False)
+            // If Left Closed -> Report Left
+            // If Right Closed -> Report Right
+
+            let finalLeftClosed = false;
+            let finalRightClosed = false;
+
+            if (rawLeftClosed && rawRightClosed) {
+                // Both closed = Blink = Do Nothing
+            } else if (rawLeftClosed) {
+                finalLeftClosed = true;
+            } else if (rawRightClosed) {
+                finalRightClosed = true;
+            }
+
+            // --- 3. UI Update ---
+            document.getElementById('gazeVal').innerText = `Gaze X: ${gazeX.toFixed(2)}`;
+
+            const leftEl = document.getElementById('winkLeft');
+            const rightEl = document.getElementById('winkRight');
+
+            leftEl.innerText = `Left Wink: ${finalLeftClosed ? "YES" : "NO"}`;
+            rightEl.innerText = `Right Wink: ${finalRightClosed ? "YES" : "NO"}`;
+
+            if (finalLeftClosed) leftEl.classList.add('highlight');
+            else leftEl.classList.remove('highlight');
+
+            if (finalRightClosed) rightEl.classList.add('highlight');
+            else rightEl.classList.remove('highlight');
+
+            document.getElementById('debugLeft').innerText = `Open: ${leftOpenness.toFixed(3)}`;
+            document.getElementById('debugRight').innerText = `Open: ${rightOpenness.toFixed(3)}`;
+
+            document.getElementById('debugLeft').style.color = rawLeftClosed ? "#ff0" : "#aaa";
+            document.getElementById('debugRight').style.color = rawRightClosed ? "#ff0" : "#aaa";
+
+            // --- 4. Send Data Immediately ---
+            if (socket && socket.connected) {
+                socket.emit('eyeData', {
+                    gazeX: gazeX,
+                    isLeftClosed: finalLeftClosed,
+                    isRightClosed: finalRightClosed
+                });
+            }
+        }
+
+        async function startCamera() {
+            try {
+                faceMesh = new FaceMesh({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+                    }
+                });
+
+                faceMesh.setOptions({
+                    maxNumFaces: 1,
+                    refineLandmarks: true, // REQUIRED: Need Iris landmarks (468-477) for Gaze tracking
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                faceMesh.onResults(onResults);
+
+                camera = new Camera(videoElement, {
+                    onFrame: async () => {
+                        await faceMesh.send({ image: videoElement });
+                    },
+                    width: 640,
+                    height: 480
+                });
+
+                await camera.start();
+                errorMsgElement.style.display = 'none';
+
+            } catch (error) {
+                showError("Camera Start Failed: " + error.message);
+            }
+        }
+
+        function retryCamera() {
+            statusElement.innerText = "Retrying...";
+            errorMsgElement.style.display = 'none';
+            startCamera();
+        }
+
+        // Initialize
+        initSocket();
+        startCamera();
+
+    </script>
+</body>
+
+</html>

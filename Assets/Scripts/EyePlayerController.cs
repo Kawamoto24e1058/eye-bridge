@@ -62,22 +62,61 @@ namespace EyeTrackingGame.Runtime
             HandleMovement();
         }
 
+        [Header("Physics Settings")]
+        [SerializeField] private float acceleration = 10.0f; // How fast to reach max speed
+        [SerializeField] private float deceleration = 10.0f; // How fast to stop (Damping)
+
+        private Vector3 _currentVelocity; // For smooth damping (Horizontal/Forward)
+
         private void HandleMovement()
         {
-            // Gazexが 0.1 以下の小さな値の時は動かないようにする（遊びを作る）
-            float moveThreshold = 0.1f;
-            Vector3 move = Vector3.zero;
+            // --- Determine Target Velocity ---
+            Vector3 targetVelocity = Vector3.zero;
 
-            // Note: gazeX is assumed to be normalized (-1 to 1) for strafing
-            if (Mathf.Abs(gazeX) > moveThreshold)
+            // 1. Forward/Backward Input (Keyboard: W/S or Arrow Keys)
+            // Use GetAxis directly for analog-like feel, or GetAxisRaw for digital
+            float forwardInput = Input.GetAxis("Vertical"); 
+            
+            // If user wants auto-run, they can hold W. If they release, it stops.
+            if (Mathf.Abs(forwardInput) > 0.1f)
             {
-                move = transform.right * gazeX * moveSpeed; 
+                targetVelocity += transform.forward * forwardInput * forwardSpeed;
             }
 
-            // 前進（常に進む設定なら、ここも条件を付ける）
-            move += transform.forward * forwardSpeed; 
+            // 2. Strafe Input (Keyboard: A/D + Gaze)
+            float strafeInput = Input.GetAxis("Horizontal");
+            
+            // Combine Gaze (if available) with Keyboard
+            // Gaze is usually -1.5 to 1.5, clamp if needed
+            float combinedStrafe = strafeInput + gazeX;
+            
+            if (Mathf.Abs(combinedStrafe) > 0.1f) // Deadzone
+            {
+                targetVelocity += transform.right * combinedStrafe * moveSpeed;
+            }
 
-            _characterController.Move(move * Time.deltaTime);
+            // --- Apply Acceleration / Deceleration (Damping) ---
+            // Manual implementation of "Linear Damping" for CharacterController
+            
+            // Move towards target velocity
+            // If target is zero (input released), we decelerate.
+            // If target is non-zero, we accelerate towards it.
+            
+            float speedChangeRate = (targetVelocity.magnitude > 0.1f) ? acceleration : deceleration;
+            
+            // Apply smoothing to X and Z specifically (leave Y for gravity)
+            float targetY = _velocity.y; // Preserve gravity velocity
+            
+            // Use Vector3.MoveTowards for linear deceleration (like friction)
+            Vector3 horizontalCurrent = new Vector3(_currentVelocity.x, 0, _currentVelocity.z);
+            Vector3 horizontalTarget = new Vector3(targetVelocity.x, 0, targetVelocity.z);
+            
+            Vector3 newHorizontal = Vector3.MoveTowards(horizontalCurrent, horizontalTarget, speedChangeRate * Time.deltaTime);
+            
+            _currentVelocity = new Vector3(newHorizontal.x, targetY, newHorizontal.z);
+
+            // Apply Move
+            _characterController.Move(_currentVelocity * Time.deltaTime);
         }
 
         private void HandleJumpInput()
